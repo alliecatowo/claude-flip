@@ -12,7 +12,7 @@ import os
 # Add parent dir to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from bleak import BleakClient
+from bleak import BleakClient, BleakScanner
 
 # Flipper BLE Serial UUIDs
 TX_CHAR_UUID = "19ed82ae-ed21-4c9d-4145-228e62fe0000"
@@ -24,7 +24,7 @@ FLIPPER_ADDRESS = os.environ.get("FLIPPER_ADDRESS", "80:E1:26:71:4C:EA")
 TIMEOUT = 300  # 5 minutes max wait for user response
 
 
-async def send_permission_request(request_text: str) -> str:
+async def send_permission_request(request_text: str, max_retries: int = 3) -> str:
     """Send request to Flipper and wait for response.
 
     Returns:
@@ -41,29 +41,42 @@ async def send_permission_request(request_text: str) -> str:
         elif text in ("Y", "N", "A", "D"):
             response = text
 
-    # Faster connection: shorter timeout
-    async with BleakClient(FLIPPER_ADDRESS, timeout=3) as client:
-        # Fire off notify subscription and write in quick succession
-        await client.start_notify(RX_CHAR_UUID, on_notify)
-        await client.write_gatt_char(
-            TX_CHAR_UUID, (request_text + "\n").encode(), response=False
-        )
+    # Retry loop for flaky BLE connections
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            # Quick scan to wake up BlueZ cache on retry
+            if attempt > 0:
+                await BleakScanner.discover(timeout=1)
 
-        # Wait for ACK
-        for _ in range(5):
-            await asyncio.sleep(0.2)
-            if got_ack:
-                break
+            async with BleakClient(FLIPPER_ADDRESS, timeout=10) as client:
+                await client.start_notify(RX_CHAR_UUID, on_notify)
+                await client.write_gatt_char(
+                    TX_CHAR_UUID, (request_text + "\n").encode(), response=False
+                )
 
-        # Wait for user response
-        for _ in range(TIMEOUT):
-            await asyncio.sleep(1)
-            if response:
-                break
+                # Wait for ACK
+                for _ in range(5):
+                    await asyncio.sleep(0.2)
+                    if got_ack:
+                        break
 
-        await client.stop_notify(RX_CHAR_UUID)
+                # Wait for user response
+                for _ in range(TIMEOUT):
+                    await asyncio.sleep(1)
+                    if response:
+                        break
 
-    return response
+                await client.stop_notify(RX_CHAR_UUID)
+
+            return response  # Success, exit retry loop
+
+        except Exception as e:
+            last_error = e
+            continue  # Try again
+
+    # All retries failed
+    raise last_error if last_error else Exception("BLE connection failed")
 
 
 CONFIG_FILE = os.path.expanduser("~/.config/claude-flip/config.json")
