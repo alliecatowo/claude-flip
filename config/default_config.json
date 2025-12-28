@@ -1,0 +1,20 @@
+{
+  "connection": {
+    "type": "auto",
+    "serial_port": "/dev/ttyACM0",
+    "ble_name": "Control Re9lea5t",
+    "timeout_seconds": 300
+  },
+  "behavior": {
+    "fallback_on_disconnect": "passthrough"
+  },
+  "always_allow": [
+    {"tool": "Read", "pattern": "*"},
+    {"tool": "Glob", "pattern": "*"},
+    {"tool": "Grep", "pattern": "*"}
+  ],
+  "always_deny": [
+    {"tool": "Bash", "pattern": "rm -rf /*"},
+    {"tool": "Bash", "pattern": "sudo rm -rf *"}
+  ]
+}

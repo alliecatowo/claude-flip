@@ -1,0 +1,12 @@
+{
+  "name": "claude-flip",
+  "version": "0.1.0",
+  "description": "Route Claude Code permission requests to your Flipper Zero for physical approval",
+  "author": {
+    "name": "claude-flip"
+  },
+  "repository": "https://github.com/yourusername/claude-flip",
+  "license": "MIT",
+  "keywords": ["flipper", "permissions", "hardware", "hooks"],
+  "hooks": "./hooks/hooks.json"
+}

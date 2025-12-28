@@ -1,0 +1,17 @@
+{
+  "description": "Route all permission requests to Flipper Zero for physical approval",
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/permission_hook.py",
+            "timeout": 310
+          }
+        ]
+      }
+    ]
+  }
+}
