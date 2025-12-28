@@ -24,21 +24,25 @@ FLIPPER_ADDRESS = os.environ.get("FLIPPER_ADDRESS", "80:E1:26:71:4C:EA")
 TIMEOUT = 300  # 5 minutes max wait for user response
 
 
-async def send_permission_request(request_text: str) -> tuple[str, str]:
+async def send_permission_request(request_text: str) -> tuple[str, int]:
     """Send request to Flipper and wait for response.
 
     Returns:
-        tuple: (response, pattern) where response is Y/N/A/D and pattern is
-               the tool pattern for remember decisions.
+        tuple: (response, mode) where response is Y/N/A/D and mode is
+               the Flipper's current permission mode (0=Default, 1=Plan, 2=AcceptEdits)
     """
     response = None
-    got_ack = False
+    mode = 0  # Default mode
 
     def on_notify(sender, data: bytes):
-        nonlocal response, got_ack
+        nonlocal response, mode
         text = data.decode().strip()
-        if text == "ACK":
-            got_ack = True
+        if text.startswith("ACK:"):
+            # Parse mode from ACK:X
+            try:
+                mode = int(text.split(":")[1])
+            except (IndexError, ValueError):
+                mode = 0
         elif text in ("Y", "N", "A", "D"):
             # Y = allow, N = deny, A = allow always, D = deny always
             response = text
@@ -59,7 +63,7 @@ async def send_permission_request(request_text: str) -> tuple[str, str]:
 
         await client.stop_notify(RX_CHAR_UUID)
 
-    return response
+    return response, mode
 
 
 DEBUG_MODE = os.environ.get("FLIPPER_DEBUG", "").lower() in ("1", "true", "yes")
@@ -152,8 +156,8 @@ def get_rule_pattern(tool_name: str, tool_input: dict) -> str:
     return "*"
 
 
-def save_permission_rule(tool_name: str, pattern: str, allow: bool = True):
-    """Save a permission rule to .claude/settings.local.json"""
+def save_permission_rules(suggestions: list, allow: bool = True):
+    """Save permission rules from Claude's suggestions to settings.local.json"""
     settings_path = os.path.expanduser("~/.claude/settings.local.json")
 
     try:
@@ -172,21 +176,28 @@ def save_permission_rule(tool_name: str, pattern: str, allow: bool = True):
         if key not in settings["permissions"]:
             settings["permissions"][key] = []
 
-        # Build rule string
-        rule = f"{tool_name}({pattern})"
+        # Extract rules from suggestions
+        rules_added = []
+        for suggestion in suggestions:
+            if suggestion.get("type") == "addRules":
+                for rule_def in suggestion.get("rules", []):
+                    tool_name = rule_def.get("toolName", "")
+                    rule_content = rule_def.get("ruleContent", "")
+                    if tool_name and rule_content:
+                        rule = f"{tool_name}({rule_content})"
+                        if rule not in settings["permissions"][key]:
+                            settings["permissions"][key].append(rule)
+                            rules_added.append(rule)
 
-        # Add rule if not already present
-        if rule not in settings["permissions"][key]:
-            settings["permissions"][key].append(rule)
-            log_debug(f"Saved rule: {rule}")
-
-            # Write back
+        if rules_added:
+            log_debug(f"Saved rules: {rules_added}")
             with open(settings_path, 'w') as f:
                 json.dump(settings, f, indent=2)
+            return True
 
-        return True
+        return False
     except Exception as e:
-        log_debug(f"Failed to save rule: {e}")
+        log_debug(f"Failed to save rules: {e}")
         return False
 
 
@@ -205,6 +216,7 @@ def main():
     # Extract relevant info for display (Claude Code format)
     tool_name = request_json.get("tool_name", "Unknown")
     tool_input = request_json.get("tool_input", {})
+    permission_suggestions = request_json.get("permission_suggestions", [])
 
     # Assess risk level
     risk = assess_risk(tool_name, tool_input)
@@ -234,7 +246,38 @@ def main():
     log_debug(f"Display: {display_msg}")
 
     try:
-        response = asyncio.run(send_permission_request(display_msg))
+        response, flipper_mode = asyncio.run(send_permission_request(display_msg))
+        log_debug(f"Flipper mode: {flipper_mode}")
+
+        # Mode-based auto-responses
+        # Mode 0 = Default (ask for everything)
+        # Mode 1 = Plan (read-only, deny writes)
+        # Mode 2 = AcceptEdits (auto-allow file edits)
+        if flipper_mode == 1:  # Plan mode
+            # Auto-deny write operations
+            if tool_name in ("Edit", "Write", "Bash"):
+                log_debug("Plan mode: auto-denying write operation")
+                print(json.dumps({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PermissionRequest",
+                        "decision": {
+                            "behavior": "deny",
+                            "message": "Plan mode: write operations blocked"
+                        }
+                    }
+                }))
+                sys.exit(0)
+        elif flipper_mode == 2:  # AcceptEdits mode
+            # Auto-allow file edits
+            if tool_name in ("Edit", "Write"):
+                log_debug("AcceptEdits mode: auto-allowing file edit")
+                print(json.dumps({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PermissionRequest",
+                        "decision": {"behavior": "allow"}
+                    }
+                }))
+                sys.exit(0)
 
         def make_response(behavior: str, message: str = None):
             """Build proper hook response format with wrapper."""
@@ -259,9 +302,8 @@ def main():
             print(output)
             sys.exit(0)
         elif response == "A":
-            # Allow always - save rule to settings
-            pattern = get_rule_pattern(tool_name, tool_input)
-            save_permission_rule(tool_name, pattern, allow=True)
+            # Allow always - save rules from Claude's suggestions
+            save_permission_rules(permission_suggestions, allow=True)
             output = json.dumps(make_response("allow"))
             log_debug(f"Output (always): {output}")
             print(output)

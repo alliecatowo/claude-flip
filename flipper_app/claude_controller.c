@@ -61,6 +61,7 @@ struct ClaudeApp {
     char display_text[RX_BUFFER_SIZE];
     char last_action[32];
     bool waiting_response;
+    bool muted;  // true = vibrate only, false = vibrate + sound
 
     PermissionMode mode;
     uint32_t request_count;
@@ -96,8 +97,10 @@ static uint16_t serial_callback(SerialServiceEvent event, void* context) {
         FURI_LOG_I(TAG, "RX %u bytes", event.data.size);
 
         if(g_app && event.data.size > 0) {
-            // Acknowledge receipt
-            ble_profile_serial_tx(g_app->serial_profile, (uint8_t*)"ACK\n", 4);
+            // Acknowledge receipt with current mode
+            char ack_msg[16];
+            snprintf(ack_msg, sizeof(ack_msg), "ACK:%d\n", g_app->mode);
+            ble_profile_serial_tx(g_app->serial_profile, (uint8_t*)ack_msg, strlen(ack_msg));
 
             furi_mutex_acquire(g_app->mutex, FuriWaitForever);
 
@@ -120,8 +123,12 @@ static uint16_t serial_callback(SerialServiceEvent event, void* context) {
 
             furi_mutex_release(g_app->mutex);
 
-            // Vibrate to notify user
-            notification_message(g_app->notifications, &sequence_single_vibro);
+            // Notify user (vibrate only if muted, beep+vibrate if not)
+            if(g_app->muted) {
+                notification_message(g_app->notifications, &sequence_single_vibro);
+            } else {
+                notification_message(g_app->notifications, &sequence_success);
+            }
 
             // Queue UI update
             AppEvent evt = {.type = EventTypeBtData};
@@ -180,9 +187,11 @@ static void draw_callback(Canvas* canvas, void* ctx) {
 
     canvas_draw_line(canvas, 0, 12, 128, 12);
 
-    // Mode indicator
-    char mode_str[32];
-    snprintf(mode_str, sizeof(mode_str), "Mode: %s", mode_names[app->mode]);
+    // Mode indicator + mute status
+    char mode_str[40];
+    snprintf(mode_str, sizeof(mode_str), "%s %s",
+        mode_names[app->mode],
+        app->muted ? "[MUTE]" : "");
     canvas_draw_str(canvas, 2, 22, mode_str);
 
     // Stats
@@ -236,8 +245,9 @@ static void draw_callback(Canvas* canvas, void* ctx) {
             canvas_draw_str_aligned(canvas, 64, 36, AlignCenter, AlignCenter, app->display_text);
         }
 
-        // Mode switch hint
-        canvas_draw_str_aligned(canvas, 64, 58, AlignCenter, AlignCenter, "Hold OK to change mode");
+        // Mode hints
+        canvas_draw_str_aligned(canvas, 64, 54, AlignCenter, AlignCenter, "Hold OK: mode");
+        canvas_draw_str_aligned(canvas, 64, 62, AlignCenter, AlignCenter, "Hold Down: mute");
     }
 
     furi_mutex_release(app->mutex);
@@ -308,6 +318,16 @@ int32_t claude_controller_app(void* p) {
                 char mode_msg[32];
                 snprintf(mode_msg, sizeof(mode_msg), "MODE:%d\n", app->mode);
                 bt_send(app, mode_msg);
+
+                notification_message(app->notifications, &sequence_single_vibro);
+            }
+            // Long press Down = toggle mute
+            else if(input->key == InputKeyDown && input->type == InputTypeLong) {
+                furi_mutex_acquire(app->mutex, FuriWaitForever);
+                app->muted = !app->muted;
+                snprintf(app->last_action, sizeof(app->last_action),
+                    app->muted ? "Sound OFF" : "Sound ON");
+                furi_mutex_release(app->mutex);
 
                 notification_message(app->notifications, &sequence_single_vibro);
             }
