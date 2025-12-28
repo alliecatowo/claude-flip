@@ -1,0 +1,14 @@
+{
+  "name": "local-plugins",
+  "owner": {
+    "name": "Allie"
+  },
+  "plugins": [
+    {
+      "name": "claude-flip",
+      "source": ".",
+      "description": "Route Claude Code permission requests to your Flipper Zero for physical approval",
+      "version": "0.1.0"
+    }
+  ]
+}

@@ -1,6 +1,16 @@
 /**
  * Claude Controller - Flipper Zero Application
+ *
+ * Routes Claude Code permission requests to your Flipper for physical approval.
  * Uses BLE Serial Profile for bidirectional communication.
+ *
+ * Controls:
+ *   Right/OK: Allow
+ *   Left:     Deny
+ *   Up:       Allow Always (remember)
+ *   Down:     Deny Always (remember)
+ *   OK Long:  Cycle permission mode
+ *   Back:     Exit
  */
 
 #include <furi.h>
@@ -15,11 +25,27 @@
 
 #define TAG "ClaudeCtrl"
 #define RX_BUFFER_SIZE 256
+#define MAX_DISPLAY_LINES 3
+
+// Permission modes
+typedef enum {
+    ModeDefault,      // Normal - ask for each permission
+    ModePlan,         // Read-only mode
+    ModeAcceptEdits,  // Auto-accept file edits
+    ModeCount
+} PermissionMode;
+
+static const char* mode_names[] = {
+    "Default",
+    "Plan Only",
+    "Accept Edits"
+};
 
 typedef struct ClaudeApp ClaudeApp;
 
-// Forward declare callback
+// Forward declarations
 static void bt_status_callback(BtStatus status, void* context);
+static uint16_t serial_callback(SerialServiceEvent event, void* context);
 
 struct ClaudeApp {
     Gui* gui;
@@ -30,11 +56,16 @@ struct ClaudeApp {
 
     Bt* bt;
     FuriHalBleProfileBase* serial_profile;
+    BtStatus bt_status;
 
     char display_text[RX_BUFFER_SIZE];
-    char response[64];
+    char last_action[32];
     bool waiting_response;
-    bool callback_set;
+
+    PermissionMode mode;
+    uint32_t request_count;
+    uint32_t allow_count;
+    uint32_t deny_count;
 };
 
 static ClaudeApp* g_app = NULL;
@@ -57,7 +88,7 @@ static void bt_send(ClaudeApp* app, const char* data) {
     }
 }
 
-// BLE Serial callback
+// BLE Serial callback - receives data from host
 static uint16_t serial_callback(SerialServiceEvent event, void* context) {
     UNUSED(context);
 
@@ -65,9 +96,8 @@ static uint16_t serial_callback(SerialServiceEvent event, void* context) {
         FURI_LOG_I(TAG, "RX %u bytes", event.data.size);
 
         if(g_app && event.data.size > 0) {
-            // Immediately echo back to confirm receipt
+            // Acknowledge receipt
             ble_profile_serial_tx(g_app->serial_profile, (uint8_t*)"ACK\n", 4);
-            FURI_LOG_I(TAG, "Sent ACK");
 
             furi_mutex_acquire(g_app->mutex, FuriWaitForever);
 
@@ -77,7 +107,7 @@ static uint16_t serial_callback(SerialServiceEvent event, void* context) {
             memcpy(g_app->display_text, event.data.buffer, len);
             g_app->display_text[len] = '\0';
 
-            // Strip newlines
+            // Strip newlines for display
             for(size_t i = 0; i < len; i++) {
                 if(g_app->display_text[i] == '\n' || g_app->display_text[i] == '\r') {
                     g_app->display_text[i] = ' ';
@@ -85,10 +115,15 @@ static uint16_t serial_callback(SerialServiceEvent event, void* context) {
             }
 
             g_app->waiting_response = true;
+            g_app->request_count++;
+            g_app->last_action[0] = '\0';
+
             furi_mutex_release(g_app->mutex);
 
+            // Vibrate to notify user
             notification_message(g_app->notifications, &sequence_single_vibro);
 
+            // Queue UI update
             AppEvent evt = {.type = EventTypeBtData};
             furi_message_queue_put(g_app->event_queue, &evt, 0);
         }
@@ -96,21 +131,32 @@ static uint16_t serial_callback(SerialServiceEvent event, void* context) {
     return 0;
 }
 
-// Called when BT status changes - re-set our callback after connection
+// Called when BT status changes
 static void bt_status_callback(BtStatus status, void* context) {
     ClaudeApp* app = context;
     FURI_LOG_I(TAG, "BT status: %d", status);
 
+    furi_mutex_acquire(app->mutex, FuriWaitForever);
+    app->bt_status = status;
+    furi_mutex_release(app->mutex);
+
     if(status == BtStatusConnected && app->serial_profile) {
-        // BT service just set its callback, override it with ours
-        FURI_LOG_I(TAG, "Connection detected, re-setting callback...");
-        furi_delay_ms(100); // Small delay to let BT service finish
+        // Re-set our callback after BT service sets theirs
+        FURI_LOG_I(TAG, "Connection detected, setting callback...");
+        furi_delay_ms(100);
         ble_profile_serial_set_event_callback(app->serial_profile, 128, serial_callback, app);
-        FURI_LOG_I(TAG, "Callback re-set!");
-        app->callback_set = true;
+
+        // Notify connected
+        notification_message(app->notifications, &sequence_success);
+    } else if(status == BtStatusAdvertising) {
+        // Waiting for connection
+        furi_mutex_acquire(app->mutex, FuriWaitForever);
+        strcpy(app->display_text, "Waiting for connection...");
+        furi_mutex_release(app->mutex);
     }
 }
 
+// Draw the UI
 static void draw_callback(Canvas* canvas, void* ctx) {
     ClaudeApp* app = ctx;
     furi_mutex_acquire(app->mutex, FuriWaitForever);
@@ -118,26 +164,80 @@ static void draw_callback(Canvas* canvas, void* ctx) {
     canvas_clear(canvas);
     canvas_set_color(canvas, ColorBlack);
 
+    // Header bar
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "Claude Controller");
-    canvas_draw_line(canvas, 0, 14, 128, 14);
+    canvas_draw_str(canvas, 2, 10, "Claude Controller");
 
+    // Connection indicator
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str(canvas, 90, 12, app->serial_profile ? "[BT]" : "[--]");
-
-    if(app->display_text[0] != '\0') {
-        canvas_draw_str(canvas, 2, 28, app->display_text);
-    } else {
-        canvas_draw_str_aligned(canvas, 64, 32, AlignCenter, AlignCenter, "Waiting...");
+    const char* conn_str;
+    switch(app->bt_status) {
+        case BtStatusConnected: conn_str = "[*]"; break;
+        case BtStatusAdvertising: conn_str = "[.]"; break;
+        default: conn_str = "[-]"; break;
     }
+    canvas_draw_str(canvas, 110, 10, conn_str);
 
+    canvas_draw_line(canvas, 0, 12, 128, 12);
+
+    // Mode indicator
+    char mode_str[32];
+    snprintf(mode_str, sizeof(mode_str), "Mode: %s", mode_names[app->mode]);
+    canvas_draw_str(canvas, 2, 22, mode_str);
+
+    // Stats
+    char stats[32];
+    snprintf(stats, sizeof(stats), "%lu/%lu/%lu",
+        app->request_count, app->allow_count, app->deny_count);
+    canvas_draw_str(canvas, 90, 22, stats);
+
+    canvas_draw_line(canvas, 0, 24, 128, 24);
+
+    // Main content area
     if(app->waiting_response) {
+        // Show permission request with word wrap
+        canvas_set_font(canvas, FontSecondary);
+
+        const char* text = app->display_text;
+        size_t len = strlen(text);
+        int y = 34;
+        size_t pos = 0;
+
+        while(pos < len && y < 50) {
+            // Find how much fits on one line (~21 chars)
+            size_t line_len = len - pos;
+            if(line_len > 21) line_len = 21;
+
+            char line[24];
+            strncpy(line, text + pos, line_len);
+            line[line_len] = '\0';
+
+            canvas_draw_str(canvas, 2, y, line);
+            y += 10;
+            pos += line_len;
+        }
+
+        // Button hints: No, Always, Yes
         canvas_draw_line(canvas, 0, 52, 128, 52);
-        canvas_draw_str(canvas, 4, 62, "<N");
-        canvas_draw_str_aligned(canvas, 64, 62, AlignCenter, AlignBottom, "OK:Y");
-        canvas_draw_str_aligned(canvas, 124, 62, AlignRight, AlignBottom, "Y>");
-    } else if(app->response[0] != '\0') {
-        canvas_draw_str_aligned(canvas, 64, 58, AlignCenter, AlignCenter, app->response);
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_str(canvas, 4, 62, "< No");
+        canvas_draw_str_aligned(canvas, 64, 62, AlignCenter, AlignBottom, "^ Always");
+        canvas_draw_str_aligned(canvas, 124, 62, AlignRight, AlignBottom, "Yes >");
+
+    } else {
+        // Idle state
+        canvas_set_font(canvas, FontSecondary);
+
+        if(app->last_action[0] != '\0') {
+            canvas_draw_str_aligned(canvas, 64, 36, AlignCenter, AlignCenter, app->last_action);
+        } else if(app->bt_status == BtStatusConnected) {
+            canvas_draw_str_aligned(canvas, 64, 36, AlignCenter, AlignCenter, "Ready - awaiting requests");
+        } else {
+            canvas_draw_str_aligned(canvas, 64, 36, AlignCenter, AlignCenter, app->display_text);
+        }
+
+        // Mode switch hint
+        canvas_draw_str_aligned(canvas, 64, 58, AlignCenter, AlignCenter, "Hold OK to change mode");
     }
 
     furi_mutex_release(app->mutex);
@@ -158,6 +258,8 @@ int32_t claude_controller_app(void* p) {
 
     app->mutex = furi_mutex_alloc(FuriMutexTypeNormal);
     app->event_queue = furi_message_queue_alloc(8, sizeof(AppEvent));
+    app->mode = ModeDefault;
+    app->bt_status = BtStatusOff;
 
     app->view_port = view_port_alloc();
     view_port_draw_callback_set(app->view_port, draw_callback, app);
@@ -169,19 +271,17 @@ int32_t claude_controller_app(void* p) {
     app->notifications = furi_record_open(RECORD_NOTIFICATION);
     app->bt = furi_record_open(RECORD_BT);
 
-    // Register for BT status changes to re-set callback after connection
+    // Register for BT status changes
     bt_set_status_changed_callback(app->bt, bt_status_callback, app);
 
     // Start serial profile
     FURI_LOG_I(TAG, "Starting serial profile...");
     app->serial_profile = bt_profile_start(app->bt, ble_profile_serial, NULL);
-    FURI_LOG_I(TAG, "bt_profile_start returned: %p", app->serial_profile);
 
     if(app->serial_profile) {
-        FURI_LOG_I(TAG, "Setting callback...");
         ble_profile_serial_set_event_callback(app->serial_profile, 128, serial_callback, app);
-        FURI_LOG_I(TAG, "Callback set!");
-        strcpy(app->display_text, "BLE Serial ready!");
+        strcpy(app->display_text, "BLE ready - connect host");
+        FURI_LOG_I(TAG, "Serial profile started");
     } else {
         strcpy(app->display_text, "BLE init failed!");
         FURI_LOG_E(TAG, "Failed to start serial profile");
@@ -193,50 +293,86 @@ int32_t claude_controller_app(void* p) {
     while(running) {
         FuriStatus status = furi_message_queue_get(app->event_queue, &event, 100);
 
-        if(status == FuriStatusOk) {
-            if(event.type == EventTypeInput && event.input.type == InputTypeShort) {
-                switch(event.input.key) {
+        if(status == FuriStatusOk && event.type == EventTypeInput) {
+            InputEvent* input = &event.input;
+
+            // Long press OK = cycle mode
+            if(input->key == InputKeyOk && input->type == InputTypeLong) {
+                furi_mutex_acquire(app->mutex, FuriWaitForever);
+                app->mode = (app->mode + 1) % ModeCount;
+                snprintf(app->last_action, sizeof(app->last_action),
+                    "Mode: %s", mode_names[app->mode]);
+                furi_mutex_release(app->mutex);
+
+                // Send mode change to host
+                char mode_msg[32];
+                snprintf(mode_msg, sizeof(mode_msg), "MODE:%d\n", app->mode);
+                bt_send(app, mode_msg);
+
+                notification_message(app->notifications, &sequence_single_vibro);
+            }
+            // Short presses
+            else if(input->type == InputTypeShort) {
+                switch(input->key) {
                 case InputKeyBack:
                     running = false;
                     break;
+
                 case InputKeyOk:
-                    if(app->waiting_response) {
-                        bt_send(app, "Y\n");
-                        furi_mutex_acquire(app->mutex, FuriWaitForever);
-                        strcpy(app->response, "-> ALLOWED");
-                        app->waiting_response = false;
-                        furi_mutex_release(app->mutex);
-                    } else {
-                        // Test: send PING when idle
-                        bt_send(app, "PING\n");
-                        furi_mutex_acquire(app->mutex, FuriWaitForever);
-                        strcpy(app->response, "Sent PING");
-                        furi_mutex_release(app->mutex);
-                    }
-                    break;
                 case InputKeyRight:
+                    // Allow
                     if(app->waiting_response) {
                         bt_send(app, "Y\n");
                         furi_mutex_acquire(app->mutex, FuriWaitForever);
-                        strcpy(app->response, "-> ALLOWED");
+                        strcpy(app->last_action, "ALLOWED");
                         app->waiting_response = false;
+                        app->allow_count++;
                         furi_mutex_release(app->mutex);
                     }
                     break;
+
                 case InputKeyLeft:
+                    // Deny
                     if(app->waiting_response) {
                         bt_send(app, "N\n");
                         furi_mutex_acquire(app->mutex, FuriWaitForever);
-                        strcpy(app->response, "-> DENIED");
+                        strcpy(app->last_action, "DENIED");
                         app->waiting_response = false;
+                        app->deny_count++;
                         furi_mutex_release(app->mutex);
                     }
                     break;
+
+                case InputKeyUp:
+                    // Allow Always (remember)
+                    if(app->waiting_response) {
+                        bt_send(app, "A\n");  // A = Allow always
+                        furi_mutex_acquire(app->mutex, FuriWaitForever);
+                        strcpy(app->last_action, "ALWAYS ALLOW");
+                        app->waiting_response = false;
+                        app->allow_count++;
+                        furi_mutex_release(app->mutex);
+                    }
+                    break;
+
+                case InputKeyDown:
+                    // Deny Always (never allow)
+                    if(app->waiting_response) {
+                        bt_send(app, "D\n");  // D = Deny always
+                        furi_mutex_acquire(app->mutex, FuriWaitForever);
+                        strcpy(app->last_action, "NEVER ALLOW");
+                        app->waiting_response = false;
+                        app->deny_count++;
+                        furi_mutex_release(app->mutex);
+                    }
+                    break;
+
                 default:
                     break;
                 }
             }
         }
+
         view_port_update(app->view_port);
     }
 
