@@ -83,7 +83,23 @@ static uint16_t serial_callback(SerialServiceEvent event, void* context) {
         FURI_LOG_I(TAG, "RX %u bytes", event.data.size);
 
         if(g_app && event.data.size > 0) {
-            // Acknowledge receipt
+            // Check if this is a DONE message (tool completed, clear pending request)
+            if(event.data.size >= 4 && strncmp((char*)event.data.buffer, "DONE", 4) == 0) {
+                furi_mutex_acquire(g_app->mutex, FuriWaitForever);
+                if(g_app->waiting_response) {
+                    // User handled it via Claude UI, not Flipper
+                    strcpy(g_app->last_action, "(via Claude)");
+                    g_app->waiting_response = false;
+                }
+                furi_mutex_release(g_app->mutex);
+
+                // Queue UI update
+                AppEvent evt = {.type = EventTypeBtData};
+                furi_message_queue_put(g_app->event_queue, &evt, 0);
+                return 0;
+            }
+
+            // Acknowledge receipt of permission request
             ble_profile_serial_tx(g_app->serial_profile, (uint8_t*)"ACK\n", 4);
 
             furi_mutex_acquire(g_app->mutex, FuriWaitForever);

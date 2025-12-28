@@ -41,10 +41,10 @@ async def send_permission_request(request_text: str) -> str:
         elif text in ("Y", "N", "A", "D"):
             response = text
 
-    async with BleakClient(FLIPPER_ADDRESS, timeout=10) as client:
+    # Faster connection: shorter timeout
+    async with BleakClient(FLIPPER_ADDRESS, timeout=3) as client:
+        # Fire off notify subscription and write in quick succession
         await client.start_notify(RX_CHAR_UUID, on_notify)
-
-        # Send the request
         await client.write_gatt_char(
             TX_CHAR_UUID, (request_text + "\n").encode(), response=False
         )
