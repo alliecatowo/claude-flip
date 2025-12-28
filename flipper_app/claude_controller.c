@@ -152,9 +152,7 @@ static void bt_status_callback(BtStatus status, void* context) {
         FURI_LOG_I(TAG, "Connection detected, setting callback...");
         furi_delay_ms(100);
         ble_profile_serial_set_event_callback(app->serial_profile, 128, serial_callback, app);
-
-        // Notify connected
-        notification_message(app->notifications, &sequence_success);
+        // Don't beep on connect - we'll beep on first request
     } else if(status == BtStatusAdvertising) {
         // Waiting for connection
         furi_mutex_acquire(app->mutex, FuriWaitForever);

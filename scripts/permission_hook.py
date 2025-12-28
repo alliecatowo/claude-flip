@@ -24,7 +24,7 @@ FLIPPER_ADDRESS = os.environ.get("FLIPPER_ADDRESS", "80:E1:26:71:4C:EA")
 TIMEOUT = 300  # 5 minutes max wait for user response
 
 
-async def send_permission_request(request_text: str) -> tuple[str, int]:
+async def send_permission_request(request_text: str, tool_name: str = "") -> tuple[str, int]:
     """Send request to Flipper and wait for response.
 
     Returns:
@@ -33,9 +33,10 @@ async def send_permission_request(request_text: str) -> tuple[str, int]:
     """
     response = None
     mode = 0  # Default mode
+    got_ack = False
 
     def on_notify(sender, data: bytes):
-        nonlocal response, mode
+        nonlocal response, mode, got_ack
         text = data.decode().strip()
         if text.startswith("ACK:"):
             # Parse mode from ACK:X
@@ -43,8 +44,8 @@ async def send_permission_request(request_text: str) -> tuple[str, int]:
                 mode = int(text.split(":")[1])
             except (IndexError, ValueError):
                 mode = 0
+            got_ack = True
         elif text in ("Y", "N", "A", "D"):
-            # Y = allow, N = deny, A = allow always, D = deny always
             response = text
 
     async with BleakClient(FLIPPER_ADDRESS, timeout=10) as client:
@@ -55,7 +56,22 @@ async def send_permission_request(request_text: str) -> tuple[str, int]:
             TX_CHAR_UUID, (request_text + "\n").encode(), response=False
         )
 
-        # Wait for response
+        # Wait for ACK first to get mode
+        for _ in range(5):
+            await asyncio.sleep(0.2)
+            if got_ack:
+                break
+
+        # Check if mode allows auto-response
+        # Mode 1 = Plan (deny writes), Mode 2 = AcceptEdits (allow edits)
+        if mode == 1 and tool_name in ("Edit", "Write", "Bash"):
+            await client.stop_notify(RX_CHAR_UUID)
+            return "PLAN_DENY", mode
+        elif mode == 2 and tool_name in ("Edit", "Write"):
+            await client.stop_notify(RX_CHAR_UUID)
+            return "AUTO_ALLOW", mode
+
+        # Wait for user response
         for _ in range(TIMEOUT):
             await asyncio.sleep(1)
             if response:
@@ -66,7 +82,26 @@ async def send_permission_request(request_text: str) -> tuple[str, int]:
     return response, mode
 
 
-DEBUG_MODE = os.environ.get("FLIPPER_DEBUG", "").lower() in ("1", "true", "yes")
+CONFIG_FILE = os.path.expanduser("~/.config/claude-flip/config.json")
+
+
+def load_config():
+    """Load plugin config."""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            pass
+    return {}
+
+
+# Check both env var and config file for debug mode
+_config = load_config()
+DEBUG_MODE = (
+    os.environ.get("FLIPPER_DEBUG", "").lower() in ("1", "true", "yes") or
+    _config.get("debug", False)
+)
 
 
 def log_debug(msg):
@@ -218,66 +253,67 @@ def main():
     tool_input = request_json.get("tool_input", {})
     permission_suggestions = request_json.get("permission_suggestions", [])
 
-    # Assess risk level
-    risk = assess_risk(tool_name, tool_input)
+    # Load config for risk display preference
+    config = load_config()
+    show_risk = config.get("show_risk", True)
+
+    # Assess risk level (if enabled)
+    risk_prefix = ""
+    if show_risk:
+        risk = assess_risk(tool_name, tool_input)
+        risk_prefix = f"[{risk}] "
 
     # Build display message based on tool type
     if tool_name == "Bash":
         cmd = tool_input.get("command", "")
-        # Show first 45 chars of command (leave room for risk)
-        display_msg = f"[{risk}] {cmd[:45]}"
+        # Show command (adjust length based on risk prefix)
+        max_len = 45 if show_risk else 55
+        display_msg = f"{risk_prefix}{cmd[:max_len]}"
     elif tool_name == "Edit":
         file_path = tool_input.get("file_path", "")
         filename = file_path.split("/")[-1] if "/" in file_path else file_path
-        display_msg = f"[{risk}] Edit: {filename}"
+        display_msg = f"{risk_prefix}Edit: {filename}"
     elif tool_name == "Write":
         file_path = tool_input.get("file_path", "")
         filename = file_path.split("/")[-1] if "/" in file_path else file_path
-        display_msg = f"[{risk}] Write: {filename}"
+        display_msg = f"{risk_prefix}Write: {filename}"
     elif tool_name == "Read":
         file_path = tool_input.get("file_path", "")
         filename = file_path.split("/")[-1] if "/" in file_path else file_path
-        display_msg = f"[{risk}] Read: {filename}"
+        display_msg = f"{risk_prefix}Read: {filename}"
     else:
-        display_msg = f"[{risk}] {tool_name}?"
+        display_msg = f"{risk_prefix}{tool_name}?"
 
     # Truncate if too long for Flipper display
     display_msg = display_msg[:60]
     log_debug(f"Display: {display_msg}")
 
     try:
-        response, flipper_mode = asyncio.run(send_permission_request(display_msg))
-        log_debug(f"Flipper mode: {flipper_mode}")
+        response, flipper_mode = asyncio.run(send_permission_request(display_msg, tool_name))
+        log_debug(f"Flipper mode: {flipper_mode}, response: {response}")
 
-        # Mode-based auto-responses
-        # Mode 0 = Default (ask for everything)
-        # Mode 1 = Plan (read-only, deny writes)
-        # Mode 2 = AcceptEdits (auto-allow file edits)
-        if flipper_mode == 1:  # Plan mode
-            # Auto-deny write operations
-            if tool_name in ("Edit", "Write", "Bash"):
-                log_debug("Plan mode: auto-denying write operation")
-                print(json.dumps({
-                    "hookSpecificOutput": {
-                        "hookEventName": "PermissionRequest",
-                        "decision": {
-                            "behavior": "deny",
-                            "message": "Plan mode: write operations blocked"
-                        }
+        # Handle mode-based auto-responses
+        if response == "PLAN_DENY":
+            log_debug("Plan mode: auto-denying write operation")
+            print(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {
+                        "behavior": "deny",
+                        "message": "Plan mode: write operations blocked"
                     }
-                }))
-                sys.exit(0)
-        elif flipper_mode == 2:  # AcceptEdits mode
-            # Auto-allow file edits
-            if tool_name in ("Edit", "Write"):
-                log_debug("AcceptEdits mode: auto-allowing file edit")
-                print(json.dumps({
-                    "hookSpecificOutput": {
-                        "hookEventName": "PermissionRequest",
-                        "decision": {"behavior": "allow"}
-                    }
-                }))
-                sys.exit(0)
+                }
+            }))
+            sys.exit(0)
+        elif response == "AUTO_ALLOW":
+            log_debug("AcceptEdits mode: auto-allowing file edit")
+            print(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {"behavior": "allow"}
+                }
+            }))
+            sys.exit(0)
 
         def make_response(behavior: str, message: str = None):
             """Build proper hook response format with wrapper."""
