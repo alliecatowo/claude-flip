@@ -1,6 +1,6 @@
 # Claude Flip - Flipper Zero Claude Code Controller
 
-> Physical hardware approval for AI operations via Flipper Zero
+> Physical hardware approval for AI operations via Flipper Zero 🐬
 
 Route ALL Claude Code permission requests to your Flipper Zero for physical approval via Bluetooth LE. Get buzzed when Claude needs permission, respond with the D-pad.
 

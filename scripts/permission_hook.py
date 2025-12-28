@@ -62,10 +62,132 @@ async def send_permission_request(request_text: str) -> tuple[str, str]:
     return response
 
 
+DEBUG_MODE = os.environ.get("FLIPPER_DEBUG", "").lower() in ("1", "true", "yes")
+
+
 def log_debug(msg):
-    """Write debug info to a file."""
-    with open("/tmp/flipper_hook_debug.log", "a") as f:
-        f.write(f"{msg}\n")
+    """Write debug info to a file (only if DEBUG_MODE enabled)."""
+    if DEBUG_MODE:
+        with open("/tmp/flipper_hook_debug.log", "a") as f:
+            f.write(f"{msg}\n")
+
+
+def assess_risk(tool_name: str, tool_input: dict) -> str:
+    """Assess risk level of the operation. Returns LOW, MED, HIGH, or CRIT."""
+    if tool_name == "Bash":
+        cmd = tool_input.get("command", "").lower()
+
+        # CRITICAL: Destructive or system-altering commands
+        critical_patterns = [
+            "rm -rf /", "rm -rf ~", "rm -rf *",
+            "mkfs", "dd if=", "> /dev/",
+            "chmod 777 /", "chown -R",
+            "curl | bash", "curl | sh", "wget | bash",
+            ":(){ :|:& };:",  # Fork bomb
+        ]
+        for pattern in critical_patterns:
+            if pattern in cmd:
+                return "CRIT"
+
+        # HIGH: Elevated privileges or network operations
+        high_patterns = [
+            "sudo ", "su -", "doas ",
+            "rm -rf", "rm -r",
+            "curl ", "wget ",
+            "ssh ", "scp ",
+            "docker ", "podman ",
+            "> /etc/", ">> /etc/",
+        ]
+        for pattern in high_patterns:
+            if pattern in cmd:
+                return "HIGH"
+
+        # MEDIUM: File modifications, package installs
+        medium_patterns = [
+            "npm install", "pip install", "cargo install",
+            "git push", "git commit",
+            "make install",
+            "mv ", "cp ",
+        ]
+        for pattern in medium_patterns:
+            if pattern in cmd:
+                return "MED"
+
+        # LOW: Read-only or safe operations
+        return "LOW"
+
+    elif tool_name in ("Edit", "Write"):
+        file_path = tool_input.get("file_path", "").lower()
+
+        # HIGH: System files
+        if file_path.startswith("/etc/") or file_path.startswith("/usr/"):
+            return "HIGH"
+
+        # MEDIUM: Config files
+        if any(p in file_path for p in [".env", "config", "settings", ".json", ".yaml"]):
+            return "MED"
+
+        return "LOW"
+
+    elif tool_name == "Read":
+        return "LOW"
+
+    return "MED"  # Unknown tools get medium risk
+
+
+def get_rule_pattern(tool_name: str, tool_input: dict) -> str:
+    """Extract a permission pattern for this tool invocation."""
+    if tool_name == "Bash":
+        cmd = tool_input.get("command", "")
+        # Get first word of command as pattern
+        first_word = cmd.split()[0] if cmd.split() else "*"
+        return f"{first_word}:*"
+    elif tool_name in ("Edit", "Write", "Read"):
+        file_path = tool_input.get("file_path", "")
+        # Get directory pattern
+        if "/" in file_path:
+            dir_path = "/".join(file_path.split("/")[:-1])
+            return f"{dir_path}/**"
+        return "*"
+    return "*"
+
+
+def save_permission_rule(tool_name: str, pattern: str, allow: bool = True):
+    """Save a permission rule to .claude/settings.local.json"""
+    settings_path = os.path.expanduser("~/.claude/settings.local.json")
+
+    try:
+        # Read existing settings
+        if os.path.exists(settings_path):
+            with open(settings_path, 'r') as f:
+                settings = json.load(f)
+        else:
+            settings = {}
+
+        # Ensure permissions structure exists
+        if "permissions" not in settings:
+            settings["permissions"] = {}
+
+        key = "allow" if allow else "deny"
+        if key not in settings["permissions"]:
+            settings["permissions"][key] = []
+
+        # Build rule string
+        rule = f"{tool_name}({pattern})"
+
+        # Add rule if not already present
+        if rule not in settings["permissions"][key]:
+            settings["permissions"][key].append(rule)
+            log_debug(f"Saved rule: {rule}")
+
+            # Write back
+            with open(settings_path, 'w') as f:
+                json.dump(settings, f, indent=2)
+
+        return True
+    except Exception as e:
+        log_debug(f"Failed to save rule: {e}")
+        return False
 
 
 def main():
@@ -80,23 +202,36 @@ def main():
         print('{"decision": "deny", "error": "Invalid JSON input"}')
         sys.exit(1)
 
-    # Extract relevant info for display
-    tool_name = request_json.get("tool", {}).get("name", "Unknown")
-    command = ""
+    # Extract relevant info for display (Claude Code format)
+    tool_name = request_json.get("tool_name", "Unknown")
+    tool_input = request_json.get("tool_input", {})
 
-    # For Bash commands, show the command
+    # Assess risk level
+    risk = assess_risk(tool_name, tool_input)
+
+    # Build display message based on tool type
     if tool_name == "Bash":
-        params = request_json.get("tool", {}).get("params", {})
-        command = params.get("command", "")[:50]  # Truncate for display
-
-    # Build display message
-    if command:
-        display_msg = f"{tool_name}: {command}"
+        cmd = tool_input.get("command", "")
+        # Show first 45 chars of command (leave room for risk)
+        display_msg = f"[{risk}] {cmd[:45]}"
+    elif tool_name == "Edit":
+        file_path = tool_input.get("file_path", "")
+        filename = file_path.split("/")[-1] if "/" in file_path else file_path
+        display_msg = f"[{risk}] Edit: {filename}"
+    elif tool_name == "Write":
+        file_path = tool_input.get("file_path", "")
+        filename = file_path.split("/")[-1] if "/" in file_path else file_path
+        display_msg = f"[{risk}] Write: {filename}"
+    elif tool_name == "Read":
+        file_path = tool_input.get("file_path", "")
+        filename = file_path.split("/")[-1] if "/" in file_path else file_path
+        display_msg = f"[{risk}] Read: {filename}"
     else:
-        display_msg = f"Allow {tool_name}?"
+        display_msg = f"[{risk}] {tool_name}?"
 
     # Truncate if too long for Flipper display
     display_msg = display_msg[:60]
+    log_debug(f"Display: {display_msg}")
 
     try:
         response = asyncio.run(send_permission_request(display_msg))
@@ -117,16 +252,32 @@ def main():
 
         log_debug(f"Flipper response: {response}")
 
-        if response == "Y" or response == "A":
-            # Allow (per docs: use "allow" not "approve")
+        if response == "Y":
+            # Allow once
             output = json.dumps(make_response("allow"))
             log_debug(f"Output: {output}")
             print(output)
             sys.exit(0)
-        elif response == "N" or response == "D":
-            # Deny (per docs: use "deny" not "block")
+        elif response == "A":
+            # Allow always - save rule to settings
+            pattern = get_rule_pattern(tool_name, tool_input)
+            save_permission_rule(tool_name, pattern, allow=True)
+            output = json.dumps(make_response("allow"))
+            log_debug(f"Output (always): {output}")
+            print(output)
+            sys.exit(0)
+        elif response == "N":
+            # Deny once
             output = json.dumps(make_response("deny", "Denied via Flipper Zero"))
             log_debug(f"Output: {output}")
+            print(output)
+            sys.exit(0)
+        elif response == "D":
+            # Deny always - save rule to settings
+            pattern = get_rule_pattern(tool_name, tool_input)
+            save_permission_rule(tool_name, pattern, allow=False)
+            output = json.dumps(make_response("deny", "Always denied via Flipper Zero"))
+            log_debug(f"Output (never): {output}")
             print(output)
             sys.exit(0)
         else:
