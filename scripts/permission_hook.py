@@ -24,26 +24,19 @@ FLIPPER_ADDRESS = os.environ.get("FLIPPER_ADDRESS", "80:E1:26:71:4C:EA")
 TIMEOUT = 300  # 5 minutes max wait for user response
 
 
-async def send_permission_request(request_text: str, tool_name: str = "") -> tuple[str, int]:
+async def send_permission_request(request_text: str) -> str:
     """Send request to Flipper and wait for response.
 
     Returns:
-        tuple: (response, mode) where response is Y/N/A/D and mode is
-               the Flipper's current permission mode (0=Default, 1=Plan, 2=AcceptEdits)
+        str: Response from Flipper - Y/N/A/D or None on timeout
     """
     response = None
-    mode = 0  # Default mode
     got_ack = False
 
     def on_notify(sender, data: bytes):
-        nonlocal response, mode, got_ack
+        nonlocal response, got_ack
         text = data.decode().strip()
-        if text.startswith("ACK:"):
-            # Parse mode from ACK:X
-            try:
-                mode = int(text.split(":")[1])
-            except (IndexError, ValueError):
-                mode = 0
+        if text.startswith("ACK"):
             got_ack = True
         elif text in ("Y", "N", "A", "D"):
             response = text
@@ -56,20 +49,11 @@ async def send_permission_request(request_text: str, tool_name: str = "") -> tup
             TX_CHAR_UUID, (request_text + "\n").encode(), response=False
         )
 
-        # Wait for ACK first to get mode
+        # Wait for ACK
         for _ in range(5):
             await asyncio.sleep(0.2)
             if got_ack:
                 break
-
-        # Check if mode allows auto-response
-        # Mode 1 = Plan (deny writes), Mode 2 = AcceptEdits (allow edits)
-        if mode == 1 and tool_name in ("Edit", "Write", "Bash"):
-            await client.stop_notify(RX_CHAR_UUID)
-            return "PLAN_DENY", mode
-        elif mode == 2 and tool_name in ("Edit", "Write"):
-            await client.stop_notify(RX_CHAR_UUID)
-            return "AUTO_ALLOW", mode
 
         # Wait for user response
         for _ in range(TIMEOUT):
@@ -79,7 +63,7 @@ async def send_permission_request(request_text: str, tool_name: str = "") -> tup
 
         await client.stop_notify(RX_CHAR_UUID)
 
-    return response, mode
+    return response
 
 
 CONFIG_FILE = os.path.expanduser("~/.config/claude-flip/config.json")
@@ -174,23 +158,6 @@ def assess_risk(tool_name: str, tool_input: dict) -> str:
     return "MED"  # Unknown tools get medium risk
 
 
-def get_rule_pattern(tool_name: str, tool_input: dict) -> str:
-    """Extract a permission pattern for this tool invocation."""
-    if tool_name == "Bash":
-        cmd = tool_input.get("command", "")
-        # Get first word of command as pattern
-        first_word = cmd.split()[0] if cmd.split() else "*"
-        return f"{first_word}:*"
-    elif tool_name in ("Edit", "Write", "Read"):
-        file_path = tool_input.get("file_path", "")
-        # Get directory pattern
-        if "/" in file_path:
-            dir_path = "/".join(file_path.split("/")[:-1])
-            return f"{dir_path}/**"
-        return "*"
-    return "*"
-
-
 def save_permission_rules(suggestions: list, allow: bool = True):
     """Save permission rules from Claude's suggestions to settings.local.json"""
     settings_path = os.path.expanduser("~/.claude/settings.local.json")
@@ -234,6 +201,21 @@ def save_permission_rules(suggestions: list, allow: bool = True):
     except Exception as e:
         log_debug(f"Failed to save rules: {e}")
         return False
+
+
+def make_response(behavior: str, message: str = None):
+    """Build proper hook response format with wrapper."""
+    result = {
+        "hookSpecificOutput": {
+            "hookEventName": "PermissionRequest",
+            "decision": {
+                "behavior": behavior
+            }
+        }
+    }
+    if message:
+        result["hookSpecificOutput"]["decision"]["message"] = message
+    return result
 
 
 def main():
@@ -289,46 +271,7 @@ def main():
     log_debug(f"Display: {display_msg}")
 
     try:
-        response, flipper_mode = asyncio.run(send_permission_request(display_msg, tool_name))
-        log_debug(f"Flipper mode: {flipper_mode}, response: {response}")
-
-        # Handle mode-based auto-responses
-        if response == "PLAN_DENY":
-            log_debug("Plan mode: auto-denying write operation")
-            print(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "PermissionRequest",
-                    "decision": {
-                        "behavior": "deny",
-                        "message": "Plan mode: write operations blocked"
-                    }
-                }
-            }))
-            sys.exit(0)
-        elif response == "AUTO_ALLOW":
-            log_debug("AcceptEdits mode: auto-allowing file edit")
-            print(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "PermissionRequest",
-                    "decision": {"behavior": "allow"}
-                }
-            }))
-            sys.exit(0)
-
-        def make_response(behavior: str, message: str = None):
-            """Build proper hook response format with wrapper."""
-            result = {
-                "hookSpecificOutput": {
-                    "hookEventName": "PermissionRequest",
-                    "decision": {
-                        "behavior": behavior
-                    }
-                }
-            }
-            if message:
-                result["hookSpecificOutput"]["decision"]["message"] = message
-            return result
-
+        response = asyncio.run(send_permission_request(display_msg))
         log_debug(f"Flipper response: {response}")
 
         if response == "Y":
@@ -351,9 +294,8 @@ def main():
             print(output)
             sys.exit(0)
         elif response == "D":
-            # Deny always - save rule to settings
-            pattern = get_rule_pattern(tool_name, tool_input)
-            save_permission_rule(tool_name, pattern, allow=False)
+            # Deny always - save rules from Claude's suggestions as deny rules
+            save_permission_rules(permission_suggestions, allow=False)
             output = json.dumps(make_response("deny", "Always denied via Flipper Zero"))
             log_debug(f"Output (never): {output}")
             print(output)
