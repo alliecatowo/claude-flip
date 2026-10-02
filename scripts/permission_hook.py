@@ -12,14 +12,17 @@ import os
 # Add parent dir to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from flip_config import get_flipper_address
 from bleak import BleakClient, BleakScanner
 
 # Flipper BLE Serial UUIDs
 TX_CHAR_UUID = "19ed82ae-ed21-4c9d-4145-228e62fe0000"
 RX_CHAR_UUID = "19ed82ae-ed21-4c9d-4145-228e61fe0000"
 
-# Flipper address - TODO: make configurable
-FLIPPER_ADDRESS = os.environ.get("FLIPPER_ADDRESS", "80:E1:26:71:4C:EA")
+# Flipper address (CLAUDE_FLIP_MAC env or ~/.config/claude-flip/config.json)
+FLIPPER_ADDRESS = get_flipper_address()
 
 TIMEOUT = 300  # 5 minutes max wait for user response
 

@@ -7,6 +7,9 @@ This allows using flipperzero_protobuf library over Bluetooth.
 import asyncio
 import threading
 from collections import deque
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from flip_config import get_flipper_address
 from bleak import BleakClient
 
 # Flipper BLE Serial UUIDs
@@ -192,7 +195,7 @@ def create_ble_flipper(address: str, debug: bool = False):
 
 if __name__ == "__main__":
     # Test connection
-    FLIPPER_ADDRESS = "80:E1:26:71:4C:EA"
+    FLIPPER_ADDRESS = get_flipper_address()
 
     print(f"Connecting to Flipper at {FLIPPER_ADDRESS}...")
     print("Make sure Claude Controller app is running on Flipper!")

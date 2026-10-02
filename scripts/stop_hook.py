@@ -7,10 +7,13 @@ import asyncio
 import sys
 import os
 
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from flip_config import get_flipper_address
 from bleak import BleakClient, BleakScanner
 
 TX_CHAR_UUID = "19ed82ae-ed21-4c9d-4145-228e62fe0000"
-FLIPPER_ADDRESS = os.environ.get("FLIPPER_ADDRESS", "80:E1:26:71:4C:EA")
+FLIPPER_ADDRESS = get_flipper_address()
 
 def log(msg):
     with open("/tmp/stop_hook.log", "a") as f:

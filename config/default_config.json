@@ -2,7 +2,7 @@
   "connection": {
     "type": "auto",
     "serial_port": "/dev/ttyACM0",
-    "ble_name": "Control Re9lea5t",
+    "ble_name": "Flipper",
     "timeout_seconds": 300
   },
   "behavior": {

@@ -4,9 +4,12 @@ Test with 64fe0000 characteristic (has read+write+notify)
 """
 
 import asyncio
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from flip_config import get_flipper_address
 from bleak import BleakClient
 
-FLIPPER_ADDRESS = "80:E1:26:71:4C:EA"
+FLIPPER_ADDRESS = get_flipper_address()
 SERIAL_SERVICE_UUID = "8fe5b3d5-2e7f-4a98-2a48-7acc60fe0000"
 
 # Try the bidirectional characteristic

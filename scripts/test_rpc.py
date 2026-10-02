@@ -4,9 +4,12 @@ Test RPC characteristic (64fe) which has read+write+notify
 """
 
 import asyncio
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from flip_config import get_flipper_address
 from bleak import BleakClient
 
-FLIPPER_ADDRESS = "80:E1:26:71:4C:EA"
+FLIPPER_ADDRESS = get_flipper_address()
 RPC_CHAR_UUID = "19ed82ae-ed21-4c9d-4145-228e64fe0000"
 TX_CHAR_UUID = "19ed82ae-ed21-4c9d-4145-228e62fe0000"
 

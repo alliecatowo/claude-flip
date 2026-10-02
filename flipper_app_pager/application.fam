@@ -1,0 +1,13 @@
+App(
+    appid="ai_pager",
+    name="AI Pager",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="ai_pager_app",
+    stack_size=4 * 1024,
+    requires=["gui", "notification"],
+    fap_version=(1, 0),
+    fap_category="Tools",
+    fap_icon="images/icon.png",
+    fap_author="claude-flip",
+    fap_description="Receive AI notifications on your Flipper",
+)

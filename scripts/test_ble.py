@@ -5,13 +5,16 @@ Start the app on Flipper first, then run this.
 """
 
 import asyncio
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from flip_config import get_flipper_address
 from bleak import BleakClient
 
 # Flipper BLE Serial UUIDs
 TX_CHAR_UUID = "19ed82ae-ed21-4c9d-4145-228e62fe0000"  # Host -> Flipper
 RX_CHAR_UUID = "19ed82ae-ed21-4c9d-4145-228e61fe0000"  # Flipper -> Host
 
-FLIPPER_ADDRESS = "80:E1:26:71:4C:EA"
+FLIPPER_ADDRESS = get_flipper_address()
 
 received = bytearray()
 

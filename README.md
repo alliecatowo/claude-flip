@@ -1,183 +1,96 @@
-# Claude Flip - Flipper Zero Claude Code Controller
+# claude-flip
 
-> Physical hardware approval for AI operations via Flipper Zero 🐬🔐
+Approve or deny Claude Code permission requests with the physical D-pad of a Flipper Zero.
 
-Route ALL Claude Code permission requests to your Flipper Zero for physical approval via Bluetooth LE. Get buzzed when Claude needs permission, respond with the D-pad.
+When Claude Code wants to run a command or edit a file, your Flipper buzzes and shows the request. Press a button to allow or deny. No keyboard needed.
 
-## Features
+## Demo
 
-- **Hardware Approval**: Every permission request goes to your Flipper Zero
-- **D-pad Control**: Physical buttons for Allow/Deny/Remember decisions
-- **BLE Serial**: Uses Flipper's BLE Serial Profile for wireless communication
-- **Mode Switching**: Cycle through permission modes (Default, Plan, Accept Edits)
-- **Stats Tracking**: See request/allow/deny counts on the Flipper display
+<!-- TODO: add a photo or GIF of the Flipper approving a Bash command (to be recorded by the author). -->
 
-## Architecture
+*Photo/GIF coming soon.*
+
+## How it works
 
 ```
-Claude Code Session
-        │
-        ▼ (PermissionRequest hook)
-┌───────────────────┐
-│ permission_hook.py│
-└───────────────────┘
-        │
-        ▼ (BLE Serial)
-┌───────────────────┐
-│ Flipper Zero      │
-│ Claude Controller │
-│                   │
-│  <No  ^Alw  Ok:Y  │
-│       vNvr     Y> │
-└───────────────────┘
+Claude Code ──PermissionRequest hook──▶ scripts/permission_hook.py
+                                              │  Python + bleak
+                                              ▼  BLE serial profile
+                                     Flipper Zero "Claude Controller" (FAP)
+                                       vibrates, shows "[RISK] Bash: ..."
+                                              │  D-pad press
+                                              ▼
+                      hook prints allow/deny decision JSON back to Claude Code
 ```
 
-## Installation
+Three pieces:
 
-### Prerequisites
+1. **Flipper app (C, FAP)**: `flipper_app/claude_controller.c` uses the Flipper BLE serial profile, shows the request, vibrates, and sends back a one-letter decision. It also tracks request/allow/deny counts.
+2. **Host bridge (Python, bleak)**: `scripts/permission_hook.py` formats a `[LOW|MED|HIGH|CRIT]` risk-scored summary (max 60 chars), sends it over BLE, waits for the Flipper's `ACK`, then waits up to 5 minutes for a button press. It retries flaky BLE connections.
+3. **Claude Code plugin**: `hooks/hooks.json` registers the script as a `PermissionRequest` hook and returns the `hookSpecificOutput` decision JSON that Claude Code expects. Slash commands wrap small helper scripts.
 
-- Python 3.8+
-- Flipper Zero with Momentum firmware (or compatible)
-- Claude Code CLI
-- `bleak` Python package for BLE
+Also included: `flipper_app_pager/` (a second, simpler Flipper app that just displays and vibrates for notifications) and `scripts/pager_mcp.py` (an MCP server that lets Claude send pages to it). Both are experimental. Hard-won BLE notes are in [docs/BLE_LESSONS_LEARNED.md](docs/BLE_LESSONS_LEARNED.md).
 
-### Host Setup
+## Setup
+
+Requirements: Python 3.8+, Claude Code, a Flipper Zero (developed against Momentum firmware), a Bluetooth adapter on the host, and [`ufbt`](https://github.com/flipperdevices/flipperzero-ufbt) to build the app.
 
 ```bash
-# Clone the repo
-git clone https://github.com/yourusername/claude-flip.git
+git clone https://github.com/alliecatowo/claude-flip.git
 cd claude-flip
-
-# Install Python dependencies
 pip install -r requirements.txt
 
-# Install as Claude Code plugin
+# Build and launch the Flipper app (Flipper connected over USB)
+cd flipper_app && ufbt launch && cd ..
+
+# Install as a Claude Code plugin
 claude plugin install . --scope user
 ```
 
-### Flipper App Setup
+### Configure your Flipper's MAC address
+
+The hook needs your Flipper's BLE MAC address. It is never hardcoded; set it with an environment variable:
 
 ```bash
-# Using ufbt (recommended)
-cd flipper_app
-ufbt build
-ufbt launch  # Uploads to Flipper via USB
-
-# Or copy the .fap file manually to your Flipper
-cp dist/claude_controller.fap /path/to/flipper/apps/Misc/
+export CLAUDE_FLIP_MAC="AA:BB:CC:DD:EE:FF"   # replace with your Flipper's address
 ```
 
-### Configure Flipper Address
+or in `~/.config/claude-flip/config.json`:
 
-Set your Flipper's BLE address (find it in Flipper Settings > Bluetooth):
-
-```bash
-export FLIPPER_ADDRESS="80:E1:26:71:4C:EA"  # Your Flipper's address
+```json
+{ "address": "AA:BB:CC:DD:EE:FF" }
 ```
 
-Or add to your shell profile for persistence.
+If it is unset, the scripts exit with a clear error (the legacy `FLIPPER_ADDRESS` variable is also honored).
+
+To find the address: start the Claude Controller app on the Flipper, pair it with your host, then run `bluetoothctl devices` (Linux) or look at the Flipper's name in your OS Bluetooth settings (macOS: System Information > Bluetooth). Running `python scripts/flipper_status.py` after setting the variable confirms the connection.
 
 ## Usage
 
-1. Launch the "Claude Controller" app on your Flipper
-2. Wait for "BLE ready" / connection indicator `[*]`
-3. Start a Claude Code session
-4. The Flipper will vibrate and display each permission request
-5. Use the D-pad to approve/deny
+1. Launch "Claude Controller" on the Flipper and wait for the connected indicator `[*]`.
+2. Start a Claude Code session.
+3. The Flipper vibrates for each permission request. Press a button:
 
-### Button Mapping
+| Button | Action |
+|--------|--------|
+| Right / OK | Allow |
+| Left | Deny |
+| Up | Allow always (remember similar commands) |
+| Down | Deny always |
+| Back | Exit the app |
 
-| Button | Action | Description |
-|--------|--------|-------------|
-| ▶ Right / OK | Allow | Approve this request |
-| ◀ Left | Deny | Reject this request |
-| ▲ Up | Allow Always | Approve and remember for similar commands |
-| ▼ Down | Deny Always | Reject and remember for similar commands |
-| ● OK (long) | Cycle Mode | Switch between Default/Plan/AcceptEdits |
-| ◄ Back | Exit | Close the app |
+Slash commands: `/flipper-status`, `/flipper-test`, `/flipper-enable`, `/flipper-disable`, `/flipper-risk` (toggle risk labels on the display).
 
-### Permission Modes
+## Security notes
 
-- **Default**: Normal - ask for each permission
-- **Plan Only**: Read-only mode (future: auto-deny writes)
-- **Accept Edits**: Auto-accept file edits (future: implement)
+- The hook trusts whatever answers over the paired BLE link. Security relies on Flipper bonding/pairing with your host; do not leave the app running in a place where untrusted devices can pair.
+- If the Flipper is unreachable or the address is unset, the hook fails with an error rather than approving anything.
+- Only `PermissionRequest` events are routed; this is a convenience gate, not a sandbox.
 
-### Slash Commands
+## Status
 
-When the plugin is installed, you get these commands:
-
-- `/flipper-status` - Check Flipper connection status
-- `/flipper-test` - Send a test message and wait for response
-- `/flipper-enable` - Enable Flipper permission routing
-- `/flipper-disable` - Disable Flipper permission routing (use normal prompts)
-
-## Display
-
-```
-┌────────────────────────────┐
-│ Claude Controller     [*]  │  <- [*]=connected, [.]=advertising, [-]=off
-├────────────────────────────┤
-│ Mode: Default    12/10/2   │  <- mode and stats (requests/allow/deny)
-├────────────────────────────┤
-│ Bash: npm install          │  <- permission request text
-│ some-package               │
-├────────────────────────────┤
-│ <No ^Alw Ok:Y vNvr     Y>  │  <- button hints
-└────────────────────────────┘
-```
-
-## Technical Details
-
-### BLE UUIDs
-
-- TX (Flipper → Host): `19ed82ae-ed21-4c9d-4145-228e62fe0000`
-- RX (Host → Flipper): `19ed82ae-ed21-4c9d-4145-228e61fe0000`
-
-### Protocol
-
-1. Host sends permission request text (max 60 chars)
-2. Flipper sends `ACK` to confirm receipt
-3. Flipper vibrates and displays request
-4. User presses button
-5. Flipper sends response: `Y` (allow), `N` (deny), `A` (allow always), `D` (deny always)
-
-### Response Handling
-
-- `Y` → `{"decision": "allow"}`
-- `N` → `{"decision": "deny"}`
-- `A` → `{"decision": "allow", "remember_pattern": "cmd *"}`
-- `D` → `{"decision": "deny", "remember_pattern": "cmd *"}`
-
-## Development
-
-```bash
-# Test the hook manually
-echo '{"tool": {"name": "Bash", "params": {"command": "npm install"}}}' | python scripts/permission_hook.py
-
-# Build Flipper app
-cd flipper_app
-ufbt build
-
-# Check Flipper logs
-ufbt cli
-> log
-```
-
-## Troubleshooting
-
-### "BLE init failed"
-- Make sure no other app is using Bluetooth
-- Try restarting the Flipper
-
-### "Connection error" on host
-- Verify FLIPPER_ADDRESS is correct
-- Make sure Claude Controller app is running on Flipper
-- Check that Flipper is in range
-
-### No vibration on requests
-- Verify the serial profile is connected (display shows `[*]`)
-- Check that the permission hook is enabled
+Early project. The core approve/deny loop works; the "mode switching" idea was removed. The `scripts/test_*.py` files are manual hardware probes (they need a Flipper and the MAC configured), not an automated test suite. `scripts/flipper_bridge.py` and the `*_pb2.py` files are an unused RPC experiment.
 
 ## License
 
-MIT
+[MIT](LICENSE)
