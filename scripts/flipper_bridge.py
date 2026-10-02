@@ -161,7 +161,7 @@ class USBSerialConnection(FlipperConnection):
 class BLEConnection(FlipperConnection):
     """Bluetooth LE connection to Flipper Zero."""
 
-    def __init__(self, device_name: str = "Re9lea5t"):
+    def __init__(self, device_name: str = "Flipper"):
         self.device_name = device_name
         self._client = None
         self._buffer = b""
@@ -270,7 +270,7 @@ class FlipperBridge:
         self,
         connection_type: ConnectionType = ConnectionType.AUTO,
         serial_port: str = "/dev/ttyACM0",
-        ble_name: str = "Control Re9lea5t",
+        ble_name: str = "Flipper",
         timeout: float = 300.0
     ):
         self.connection_type = connection_type
@@ -404,7 +404,7 @@ def send_permission_request_sync(
     bridge = FlipperBridge(
         connection_type=ConnectionType.AUTO,
         serial_port=config.get('serial_port', '/dev/ttyACM0'),
-        ble_name=config.get('ble_name', 'Re9lea5t'),
+        ble_name=config.get('ble_name', 'Flipper'),
         timeout=config.get('timeout_seconds', 300)
     )
 

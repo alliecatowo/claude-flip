@@ -5,6 +5,9 @@ Start the Claude Controller app on your Flipper FIRST, then run this.
 """
 
 import asyncio
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from flip_config import get_flipper_address
 from bleak import BleakClient
 
 # Flipper BLE Serial UUIDs
@@ -12,7 +15,7 @@ SERIAL_SERVICE_UUID = "8fe5b3d5-2e7f-4a98-2a48-7acc60fe0000"
 TX_CHAR_UUID = "19ed82ae-ed21-4c9d-4145-228e62fe0000"  # Host -> Flipper
 RX_CHAR_UUID = "19ed82ae-ed21-4c9d-4145-228e61fe0000"  # Flipper -> Host
 
-FLIPPER_ADDRESS = "80:E1:26:71:4C:EA"
+FLIPPER_ADDRESS = get_flipper_address()
 
 received_data = bytearray()
 

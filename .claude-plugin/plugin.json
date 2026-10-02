@@ -5,7 +5,7 @@
   "author": {
     "name": "claude-flip"
   },
-  "repository": "https://github.com/yourusername/claude-flip",
+  "repository": "https://github.com/alliecatowo/claude-flip",
   "license": "MIT",
   "keywords": ["flipper", "permissions", "hardware", "hooks"],
   "hooks": "./hooks/hooks.json"
