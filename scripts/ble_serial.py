@@ -11,6 +11,7 @@ import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from flip_config import get_flipper_address
 from bleak import BleakClient
+from bleak.backends.characteristic import BleakGATTCharacteristic
 
 # Flipper BLE Serial UUIDs
 SERIAL_SERVICE_UUID = "8fe5b3d5-2e7f-4a98-2a48-7acc60fe0000"
@@ -32,7 +33,7 @@ class BleSerial:
         self._thread = None
         self._connected = False
 
-    def _notification_handler(self, sender, data: bytes):
+    def _notification_handler(self, sender: BleakGATTCharacteristic, data: bytearray):
         """Handle incoming BLE notifications."""
         if self.debug:
             print(f"RX: {data.hex()} ({len(data)} bytes)")
