@@ -4,20 +4,18 @@ Claude Code PostToolUse hook - notifies Flipper that a tool completed.
 """
 
 import asyncio
-import sys
 import os
+import sys
 
-import os as _os, sys as _sys
-_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
-from flip_config import get_flipper_address
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from flip_config import append_private_log, get_flipper_address
 from bleak import BleakClient, BleakScanner
 
 TX_CHAR_UUID = "19ed82ae-ed21-4c9d-4145-228e62fe0000"
 FLIPPER_ADDRESS = get_flipper_address()
 
 def log(msg):
-    with open("/tmp/stop_hook.log", "a") as f:
-        f.write(f"{msg}\n")
+    append_private_log("stop_hook.log", str(msg))
 
 async def notify_done():
     log("=== stop_hook v2 ===")

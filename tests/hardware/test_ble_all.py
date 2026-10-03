@@ -4,8 +4,10 @@ Test all notify characteristics to find the one receiving data
 """
 
 import asyncio
-import os as _os, sys as _sys
-_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts"))
 from flip_config import get_flipper_address
 from bleak import BleakClient
 

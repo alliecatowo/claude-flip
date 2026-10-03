@@ -89,7 +89,17 @@ Slash commands: `/flipper-status`, `/flipper-test`, `/flipper-enable`, `/flipper
 
 ## Status
 
-Early project. The core approve/deny loop works; the "mode switching" idea was removed. The `scripts/test_*.py` files are manual hardware probes (they need a Flipper and the MAC configured), not an automated test suite. `scripts/flipper_bridge.py` and the `*_pb2.py` files are an unused RPC experiment.
+Early project. The core approve/deny loop works; the "mode switching" idea was removed. Hardware smoke tests with a real Flipper are still manual: the probes live in `tests/hardware/` (they need a Flipper and the MAC configured) and are never collected by pytest.
+
+## Development
+
+```bash
+python -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+python -m pytest        # risk assessment, rule saving, hook decisions, BLE retry logic (no hardware needed)
+```
+
+CI runs the same commands on every push and pull request. Debug logging (`FLIPPER_DEBUG=1` or `"debug": true` in the config file) writes to `~/.local/state/claude-flip/hook_debug.log` (mode 0600), never to `/tmp`.
 
 ## License
 

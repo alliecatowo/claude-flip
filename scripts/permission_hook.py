@@ -6,15 +6,15 @@ Reads JSON from stdin, sends to Flipper via BLE, returns decision.
 
 import asyncio
 import json
-import sys
 import os
+import re
+import shlex
+import sys
 
-# Add parent dir to path for imports
+# Add this directory to the path for sibling imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import os as _os, sys as _sys
-_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
-from flip_config import get_flipper_address
+from flip_config import append_private_log, get_flipper_address
 from bleak import BleakClient, BleakScanner
 from bleak.backends.characteristic import BleakGATTCharacteristic
 
@@ -92,7 +92,7 @@ def load_config():
         try:
             with open(CONFIG_FILE, 'r') as f:
                 return json.load(f)
-        except:
+        except (OSError, ValueError):
             pass
     return {}
 
@@ -106,55 +106,172 @@ DEBUG_MODE = (
 
 
 def log_debug(msg):
-    """Write debug info to a file (only if DEBUG_MODE enabled)."""
+    """Write debug info to a private log file (only if DEBUG_MODE enabled).
+
+    The file is ~/.local/state/claude-flip/hook_debug.log (mode 0600): it records the commands
+    Claude Code asks about, so it must not sit in a shared directory like /tmp.
+    """
     if DEBUG_MODE:
-        with open("/tmp/flipper_hook_debug.log", "a") as f:
-            f.write(f"{msg}\n")
+        append_private_log("hook_debug.log", str(msg))
+
+
+_PIPELINE_OPERATORS = {"|", "|&"}
+_COMMAND_SEPARATORS = {"||", "&&", ";", ";;", "&", "(", ")", "\n"}
+_REDIRECTS = {">", ">>", ">|", "&>", "&>>"}
+_SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "ash"}
+_FETCHERS = {"curl", "wget"}
+_HARMLESS_DEVICES = {"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/zero"}
+_DANGEROUS_RM_TARGETS = {"/", "/*", "~", "~/", "~/*", "*", "$HOME", "$HOME/", "$HOME/*", "${HOME}"}
+_PRIVILEGE_COMMANDS = {"sudo", "su", "doas"}
+_WRAPPERS = {"sudo", "doas", "command", "exec", "nohup", "time", "env", "nice", "xargs"}
+_MEDIUM_SUBCOMMANDS = {
+    "npm": {"install", "i"}, "pip": {"install"}, "pip3": {"install"}, "cargo": {"install"},
+    "git": {"push", "commit"}, "make": {"install"},
+}
+
+
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _tokenize(cmd: str) -> list:
+    """Split a shell command into tokens with operators (| && ; > ...) as separate tokens."""
+    lexer = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:  # unbalanced quotes: fall back to whitespace splitting
+        return cmd.split()
+
+
+def _parse_pipelines(cmd: str):
+    """Return pipelines: lists of (argv, redirect_targets) joined by | within a pipeline.
+
+    Pipelines are separated by && || ; & and newlines. Leading VAR=value assignments are dropped.
+    """
+    pipelines, pipeline, argv, redirects = [], [], [], []
+    tokens = _tokenize(cmd)
+    i = 0
+
+    def end_command():
+        nonlocal argv, redirects
+        while argv and _ASSIGNMENT.match(argv[0]):
+            argv = argv[1:]
+        if argv or redirects:
+            pipeline.append((argv, redirects))
+        argv, redirects = [], []
+
+    def end_pipeline():
+        nonlocal pipeline
+        end_command()
+        if pipeline:
+            pipelines.append(pipeline)
+        pipeline = []
+
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in _PIPELINE_OPERATORS:
+            end_command()
+        elif tok in _COMMAND_SEPARATORS:
+            end_pipeline()
+        elif tok in _REDIRECTS or (tok[:1].isdigit() and tok[1:] in _REDIRECTS):
+            if i + 1 < len(tokens):
+                redirects.append(tokens[i + 1])
+                i += 1
+        else:
+            argv.append(tok)
+        i += 1
+    end_pipeline()
+    return pipelines
+
+
+def _strip_wrappers(argv: list) -> list:
+    """Drop sudo/env/... prefixes (and their flags) so the real command is argv[0]."""
+    argv = list(argv)
+    while argv and os.path.basename(argv[0]) in _WRAPPERS:
+        argv.pop(0)
+        while argv and (argv[0].startswith("-") or _ASSIGNMENT.match(argv[0])):
+            argv.pop(0)
+    return argv
+
+
+def _is_recursive_rm(argv: list) -> bool:
+    flags = [a for a in argv[1:] if a.startswith("-")]
+    return any(
+        a in ("--recursive", "-R", "-r") or (not a.startswith("--") and ("r" in a[1:] or "R" in a[1:]))
+        for a in flags
+    )
+
+
+def _assess_bash(raw_cmd: str) -> str:
+    cmd = raw_cmd.lower()
+    if ":(){ :|:& };:" in cmd or ":(){:|:&};:" in cmd:
+        return "CRIT"
+
+    level = "LOW"
+    rank = {"LOW": 0, "MED": 1, "HIGH": 2, "CRIT": 3}
+
+    def raise_to(new):
+        nonlocal level
+        if rank[new] > rank[level]:
+            level = new
+
+    for pipeline in _parse_pipelines(raw_cmd):
+        commands = []  # (name, argv_without_wrappers, had_privilege_wrapper)
+        for argv, redirects in pipeline:
+            real = _strip_wrappers(argv)
+            privileged = any(os.path.basename(a) in _PRIVILEGE_COMMANDS for a in argv[: len(argv) - len(real)])
+            name = os.path.basename(real[0]).lower() if real else ""
+            commands.append((name, real, privileged))
+
+            for target in redirects:
+                if target.startswith("/dev/") and target not in _HARMLESS_DEVICES and not target.startswith("/dev/fd/"):
+                    raise_to("CRIT")
+                elif target.startswith("/etc/"):
+                    raise_to("HIGH")
+
+        # Anything fetched from the network and piped into a shell
+        seen_fetcher = False
+        for name, _real, _priv in commands:
+            if name in _FETCHERS:
+                seen_fetcher = True
+            elif seen_fetcher and name in _SHELLS:
+                raise_to("CRIT")
+
+        for name, real, privileged in commands:
+            if not name:
+                continue
+            if privileged or name in _PRIVILEGE_COMMANDS:
+                raise_to("HIGH")
+            if name.startswith("mkfs"):
+                raise_to("CRIT")
+            elif name == "dd" and any(a.startswith("if=") for a in real[1:]):
+                raise_to("CRIT")
+            elif name == "chown" and any(a in ("-R", "--recursive") for a in real[1:]):
+                raise_to("CRIT")
+            elif name == "chmod" and "777" in real[1:] and any(a in ("/", "/*") for a in real[1:]):
+                raise_to("CRIT")
+            elif name == "rm" and _is_recursive_rm(real):
+                targets = [a for a in real[1:] if not a.startswith("-")]
+                raise_to("CRIT" if any(t in _DANGEROUS_RM_TARGETS for t in targets) else "HIGH")
+            elif name in _FETCHERS | {"ssh", "scp", "docker", "podman"}:
+                raise_to("HIGH")
+            elif name in _MEDIUM_SUBCOMMANDS and any(a in _MEDIUM_SUBCOMMANDS[name] for a in real[1:3]):
+                raise_to("MED")
+            elif name in ("mv", "cp"):
+                raise_to("MED")
+
+    return level
 
 
 def assess_risk(tool_name: str, tool_input: dict) -> str:
-    """Assess risk level of the operation. Returns LOW, MED, HIGH, or CRIT."""
+    """Assess risk level of the operation. Returns LOW, MED, HIGH, or CRIT.
+
+    Bash commands are parsed with shlex into pipelines, so `curl x | bash`, `cat f | sudo tee g`
+    and `rm -rf ~` are recognised however they are spaced, while `echo "curl"` and
+    `> /dev/null` are not mistaken for dangerous operations.
+    """
     if tool_name == "Bash":
-        cmd = tool_input.get("command", "").lower()
-
-        # CRITICAL: Destructive or system-altering commands
-        critical_patterns = [
-            "rm -rf /", "rm -rf ~", "rm -rf *",
-            "mkfs", "dd if=", "> /dev/",
-            "chmod 777 /", "chown -R",
-            "curl | bash", "curl | sh", "wget | bash",
-            ":(){ :|:& };:",  # Fork bomb
-        ]
-        for pattern in critical_patterns:
-            if pattern in cmd:
-                return "CRIT"
-
-        # HIGH: Elevated privileges or network operations
-        high_patterns = [
-            "sudo ", "su -", "doas ",
-            "rm -rf", "rm -r",
-            "curl ", "wget ",
-            "ssh ", "scp ",
-            "docker ", "podman ",
-            "> /etc/", ">> /etc/",
-        ]
-        for pattern in high_patterns:
-            if pattern in cmd:
-                return "HIGH"
-
-        # MEDIUM: File modifications, package installs
-        medium_patterns = [
-            "npm install", "pip install", "cargo install",
-            "git push", "git commit",
-            "make install",
-            "mv ", "cp ",
-        ]
-        for pattern in medium_patterns:
-            if pattern in cmd:
-                return "MED"
-
-        # LOW: Read-only or safe operations
-        return "LOW"
+        return _assess_bash(tool_input.get("command", ""))
 
     elif tool_name in ("Edit", "Write"):
         file_path = tool_input.get("file_path", "").lower()

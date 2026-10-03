@@ -33,3 +33,30 @@ def get_flipper_address(required: bool = True):
         print(_HELP, file=sys.stderr)
         sys.exit(1)  # non-blocking: exit 2 would deny/block in hooks
     return addr
+
+
+def private_log_path(name: str) -> Path:
+    """Path of a log file in a private, user-owned directory.
+
+    Logs can contain the commands Claude Code asks permission for, so they must not live
+    in a world-readable, predictable location such as /tmp. Uses
+    $XDG_STATE_HOME/claude-flip (default ~/.local/state/claude-flip).
+    """
+    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+    return Path(base) / "claude-flip" / name
+
+
+def append_private_log(name: str, line: str) -> None:
+    """Append a line to a private log (dir 0700, file 0600, never follows symlinks).
+
+    Failures are swallowed: logging must never break a permission hook.
+    """
+    try:
+        path = private_log_path(name)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags, 0o600)
+        with os.fdopen(fd, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass

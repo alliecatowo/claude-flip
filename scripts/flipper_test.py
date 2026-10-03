@@ -4,11 +4,11 @@ Send a test message to Flipper Zero and wait for response.
 """
 
 import asyncio
+
 import os
 import sys
 
-import os as _os, sys as _sys
-_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from flip_config import get_flipper_address
 from bleak import BleakClient
 from bleak.backends.characteristic import BleakGATTCharacteristic
