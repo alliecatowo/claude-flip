@@ -22,7 +22,8 @@ jobs:
           python-version: "3.13"
           cache: pip
       - run: pip install -r requirements.txt
-      - run: python -m compileall -q scripts
+      - run: python -m compileall -q scripts tests
+      - run: python -m pytest -q
       - name: Validate JSON manifests
         run: |
           for f in $(git ls-files '*.json'); do jq empty "$f"; done

@@ -10,14 +10,12 @@ Tools:
 """
 
 import asyncio
-import os
-import sys
 from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
-import os as _os, sys as _sys
-_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
-from flip_config import get_flipper_address
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from flip_config import get_flipper_address  # noqa: E402
 from bleak import BleakClient, BleakScanner  # noqa: E402

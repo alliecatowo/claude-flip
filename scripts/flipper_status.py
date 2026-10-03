@@ -4,11 +4,11 @@ Check Flipper Zero BLE connection status.
 """
 
 import asyncio
+
 import os
 import sys
 
-import os as _os, sys as _sys
-_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from flip_config import get_flipper_address
 from bleak import BleakClient, BleakScanner
 
