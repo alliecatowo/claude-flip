@@ -13,8 +13,11 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Callable
+from typing import TYPE_CHECKING, Optional, Callable
 import logging
+
+if TYPE_CHECKING:
+    from bleak.backends.characteristic import BleakGATTCharacteristic
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG if os.environ.get('DEBUG') else logging.INFO)
@@ -205,7 +208,7 @@ class BLEConnection(FlipperConnection):
             logger.error(f"BLE connection failed: {e}")
             return False
 
-    def _handle_rx_notification(self, sender, data: bytes):
+    def _handle_rx_notification(self, sender: "BleakGATTCharacteristic", data: bytearray):
         """Handle incoming BLE notifications."""
         self._buffer += data
         # Check for complete messages

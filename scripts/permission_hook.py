@@ -16,6 +16,7 @@ import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from flip_config import get_flipper_address
 from bleak import BleakClient, BleakScanner
+from bleak.backends.characteristic import BleakGATTCharacteristic
 
 # Flipper BLE Serial UUIDs
 TX_CHAR_UUID = "19ed82ae-ed21-4c9d-4145-228e62fe0000"
@@ -36,7 +37,7 @@ async def send_permission_request(request_text: str, max_retries: int = 3) -> st
     response = None
     got_ack = False
 
-    def on_notify(sender, data: bytes):
+    def on_notify(sender: BleakGATTCharacteristic, data: bytearray):
         nonlocal response, got_ack
         text = data.decode().strip()
         if text.startswith("ACK"):

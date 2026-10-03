@@ -9,6 +9,7 @@ import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from flip_config import get_flipper_address
 from bleak import BleakClient
+from bleak.backends.characteristic import BleakGATTCharacteristic
 
 # Flipper BLE Serial UUIDs
 TX_CHAR_UUID = "19ed82ae-ed21-4c9d-4145-228e62fe0000"  # Host -> Flipper
@@ -18,7 +19,7 @@ FLIPPER_ADDRESS = get_flipper_address()
 
 received = bytearray()
 
-def on_notify(sender, data: bytes):
+def on_notify(sender: BleakGATTCharacteristic, data: bytearray):
     print(f"RX: {data!r}")
     received.extend(data)
 
