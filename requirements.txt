@@ -3,5 +3,5 @@ pyserial>=3.5
 bleak>=3.0.2
 
 # Testing
-pytest>=9.1.1
+pytest>=9.2.0
 pytest-asyncio>=1.4.0
